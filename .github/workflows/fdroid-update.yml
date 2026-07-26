@@ -1,0 +1,65 @@
+name: F-Droid Repo Update
+
+on:
+  push:
+    paths:
+      - 'repo/**/*.apk'      # 只有 repo 下新增/改动 apk 才触发
+      - 'metadata/**'        # 顺手：改元数据也重算索引
+    branches:
+      - main                 # 改成你的默认分支
+  workflow_dispatch:         # 手动按钮也能跑
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0     # fdroid 有时看 git 历史，全量拉稳一点
+
+      - name: 装系统依赖
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y python3-venv python3-pip \
+            python3-dev libjpeg-dev zlib1g-dev librsvg2-bin
+
+      - name: 建 venv 装 fdroidserver
+        run: |
+          python3 -m venv .venv
+          . .venv/bin/activate
+          pip install --upgrade pip
+          pip install fdroidserver
+          fdroid --version
+
+      - name: 还原 config.yml 和 keystore（从 Secrets）
+        env:
+          CONFIG_YML: ${{ secrets.FDROID_CONFIG_YML }}
+          KEYSTORE_B64: ${{ secrets.FDROID_KEYSTORE_B64 }}
+        run: |
+          # 把 base64 化的 config.yml / keystore 还原出来
+          echo "$CONFIG_YML" | base64 -d > config.yml
+          echo "$KEYSTORE_B64" | base64 -d > keystore.p12
+          # 校验一下 keystore 在不在
+          ls -la config.yml keystore.p12
+
+      - name: fdroid update
+        run: |
+          . .venv/bin/activate
+          # 纯二进制仓库：用 -c 自动补缺失 metadata 骨架，再正式 update
+          fdroid update -c
+          fdroid update
+
+      - name: 提交更新后的索引（index.xml/index-v1.json 等）
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          # 只提交 fdroid 重新生成的索引/图标，不碰你的 apk
+          git add repo/index*.xml repo/index*.jar repo/index*.json \
+                  repo/icons/ metadata/ || true
+          if git diff --cached --quiet; then
+            echo "无索引变更，跳过提交"
+          else
+            git commit -m "ci: fdroid update $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            git push
+          fi
